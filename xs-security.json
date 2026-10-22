@@ -1,0 +1,19 @@
+{
+  "xsappname": "s3-mcp-server",
+  "tenant-mode": "dedicated",
+  "description": "Access control for the S3 Explorer MCP server",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.Read",
+      "description": "List folders and files in the bucket"
+    }
+  ],
+  "role-templates": [
+    {
+      "name": "S3Viewer",
+      "description": "Can use the S3 Explorer MCP server",
+      "scope-references": ["$XSAPPNAME.Read"]
+    }
+  ],
+  "authorities": ["$XSAPPNAME.Read"]
+}

@@ -1,0 +1,17 @@
+---
+applications:
+  - name: s3-mcp-server
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    buildpacks:
+      - python_buildpack
+    command: python s3_server.py
+    random-route: true
+    health-check-type: http
+    health-check-http-endpoint: /health
+    env:
+      S3_MAX_ITEMS: "1000"
+    services:
+      - s3-mcp-objectstore
+      - s3-mcp-xsuaa
