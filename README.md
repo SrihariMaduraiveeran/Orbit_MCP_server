@@ -15,45 +15,35 @@ If you don't pass `bucket`, every tool uses the configured bucket. On BTP that i
 
 ## Deploy to SAP BTP (Cloud Foundry)
 
+The app gets its AWS credentials and API key from environment variables set in `manifest.yml`, so it needs no BTP services. The real values live in `vars.yml`, which git ignores; the manifest only holds `((placeholders))`.
+
 | File | Purpose |
 |------|---------|
-| `manifest.yml` | Defines the CF app: Python buildpack, `/health` health check, and the bound services |
-| `xs-security.json` | Defines the XSUAA `Read` scope that callers need |
+| `manifest.yml` | Defines the CF app: Python buildpack, `/health` health check, and environment variables |
+| `vars.example.yml` | Template for `vars.yml`, which holds the real credentials (never committed) |
 | `runtime.txt` | Sets the Python version for the buildpack |
-| `.cfignore` | Keeps `venv/`, `.env` and the key files out of the upload |
+| `.cfignore` | Keeps `venv/`, `.env`, `vars.yml` and the key files out of the upload |
 
 ### 1. Log in
 
 ```bash
-cf login -a https://api.cf.<region>.hana.ondemand.com
+cf login -a https://api.cf.<region>.hana.ondemand.com --sso
 cf target -o <org> -s <space>
 ```
 
-### 2. Create the services
-
-The service names must match the ones in `manifest.yml`:
+### 2. Fill in `vars.yml`
 
 ```bash
-# S3 bucket: SAP Object Store on an AWS-based subaccount
-cf create-service objectstore s3-standard s3-mcp-objectstore
-
-# Authentication
-cf create-service xsuaa application s3-mcp-xsuaa -c xs-security.json
+cp vars.example.yml vars.yml
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # use as mcp_api_key
 ```
 
-To use an existing AWS S3 bucket instead of SAP Object Store, create a user-provided service with the same name:
-
-```bash
-cf create-user-provided-service s3-mcp-objectstore -t objectstore -p '{
-  "access_key_id": "...", "secret_access_key": "...",
-  "bucket": "my-bucket", "region": "eu-central-1"
-}'
-```
+Set the bucket name, region, AWS access key and secret, and the API key.
 
 ### 3. Push the app
 
 ```bash
-cf push
+cf push --vars-file vars.yml
 ```
 
 The `routes:` line in the `cf push` output gives the app URL. Check it with:
@@ -62,30 +52,27 @@ The `routes:` line in the `cf push` output gives the app URL. Check it with:
 curl https://<app-route>/health        # {"status":"ok"}
 ```
 
-The MCP endpoint is `https://<app-route>/mcp`.
+The MCP endpoint is `https://<app-route>/mcp`. Every call needs the header `Authorization: Bearer <mcp_api_key>`.
 
-### 4. Get an access token
-
-Every call to `/mcp` needs an XSUAA bearer token with the `Read` scope:
-
-```bash
-cf create-service-key s3-mcp-xsuaa s3-mcp-key
-cf service-key s3-mcp-xsuaa s3-mcp-key      # note url, clientid, clientsecret
-
-curl -s -u '<clientid>:<clientsecret>' \
-  '<url>/oauth/token?grant_type=client_credentials' | jq -r .access_token
-```
-
-Tokens expire, usually after 12 hours, so fetch a new one when calls start returning `401`.
-
-### 5. Connect Claude Code to the deployed server
+### 4. Connect Claude Code to the deployed server
 
 ```bash
 claude mcp add --transport http s3-explorer https://<app-route>/mcp \
-  --header "Authorization: Bearer <access_token>"
+  --header "Authorization: Bearer <mcp_api_key>"
 ```
 
-Other BTP apps, such as a Joule agent or an app behind the approuter, can call the endpoint with their own XSUAA token. The token must carry the `s3-mcp-server.Read` scope. Assign the `S3Viewer` role template to users through a role collection.
+To change a credential later, edit `vars.yml` and run `cf push --vars-file vars.yml` again.
+
+### Optional: XSUAA instead of an API key
+
+If an XSUAA service is bound, the server validates XSUAA JWTs (scope `<xsappname>.Read`, defined in `xs-security.json`) instead of the API key:
+
+```bash
+cf create-service xsuaa application s3-mcp-xsuaa -c xs-security.json
+cf bind-service s3-mcp-server s3-mcp-xsuaa && cf restage s3-mcp-server
+```
+
+The server also reads S3 credentials from a bound SAP Object Store service (label `objectstore`) when one exists. Those take priority over the environment variables.
 
 ### Useful commands
 
@@ -107,7 +94,7 @@ MCP_TRANSPORT=http python s3_server.py      # HTTP at http://localhost:8000/mcp
 fastmcp dev s3_server.py                    # MCP Inspector UI for testing
 ```
 
-Locally, the server uses no authentication. On Cloud Foundry it refuses to start unless an XSUAA service is bound. You can override that with `ALLOW_UNAUTHENTICATED=true`, but don't do it in production.
+Locally, the server uses no authentication unless `MCP_API_KEY` is set. On Cloud Foundry it refuses to start unless `MCP_API_KEY` is set or an XSUAA service is bound. You can override that with `ALLOW_UNAUTHENTICATED=true`, but don't do it in production.
 
 ### Note on FIPS-mode OpenSSL (local only)
 

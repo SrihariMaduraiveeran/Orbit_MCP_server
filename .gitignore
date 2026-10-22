@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 destination_key.json
+vars.yml
 *service-key*.json
 
 # Python

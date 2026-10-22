@@ -11,7 +11,10 @@ applications:
     health-check-type: http
     health-check-http-endpoint: /health
     env:
+      # Values in ((...)) are filled from vars.yml:  cf push --vars-file vars.yml
+      S3_BUCKET_NAME: ((s3_bucket_name))
+      AWS_REGION: ((aws_region))
+      AWS_ACCESS_KEY_ID: ((aws_access_key_id))
+      AWS_SECRET_ACCESS_KEY: ((aws_secret_access_key))
+      #MCP_API_KEY: ((mcp_api_key))
       S3_MAX_ITEMS: "1000"
-    services:
-      - s3-mcp-objectstore
-      - s3-mcp-xsuaa

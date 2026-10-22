@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 from typing import Optional
@@ -8,6 +9,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -40,14 +42,30 @@ S3_SECRET_ACCESS_KEY = _objectstore.get("secret_access_key") or os.getenv("AWS_S
 MAX_ITEMS_DEFAULT = int(os.getenv("S3_MAX_ITEMS", "1000"))
 
 
-def build_auth() -> Optional[JWTVerifier]:
-    """Validate XSUAA-issued JWTs when an XSUAA service is bound."""
+class APIKeyVerifier(TokenVerifier):
+    """Accepts requests whose bearer token equals the configured API key."""
+
+    def __init__(self, api_key: str):
+        super().__init__()
+        self.api_key = api_key
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        if not hmac.compare_digest(token.encode(), self.api_key.encode()):
+            return None
+        return AccessToken(token="api-key", client_id="api-key-client", scopes=[])
+
+
+def build_auth() -> Optional[TokenVerifier]:
+    """XSUAA JWTs when an XSUAA service is bound, otherwise a static API key (MCP_API_KEY)."""
     xsuaa = get_service_credentials("xsuaa")
     if not xsuaa:
+        api_key = os.getenv("MCP_API_KEY")
+        if api_key:
+            return APIKeyVerifier(api_key)
         if ON_CLOUD_FOUNDRY and os.getenv("ALLOW_UNAUTHENTICATED", "").lower() != "true":
             raise RuntimeError(
-                "No XSUAA service bound. Bind one (see xs-security.json) or set "
-                "ALLOW_UNAUTHENTICATED=true to expose the server without authentication."
+                "No authentication configured. Set MCP_API_KEY, bind an XSUAA service "
+                "(see xs-security.json), or set ALLOW_UNAUTHENTICATED=true."
             )
         return None
 
