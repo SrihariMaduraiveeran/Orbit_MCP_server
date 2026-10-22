@@ -15,14 +15,15 @@ If you don't pass `bucket`, every tool uses the configured bucket. On BTP that i
 
 ## Deploy to SAP BTP (Cloud Foundry)
 
-The app gets its AWS credentials and API key from environment variables set in `manifest.yml`, so it needs no BTP services. The real values live in `vars.yml`, which git ignores; the manifest only holds `((placeholders))`.
+The app gets its AWS credentials and API key from the `env:` section of `manifest.yml`, so it needs no BTP services.
+
+**`manifest.yml` holds real credentials, so git ignores it and it isn't in the repository.** Create it locally from the template below.
 
 | File | Purpose |
 |------|---------|
-| `manifest.yml` | Defines the CF app: Python buildpack, `/health` health check, and environment variables |
-| `vars.example.yml` | Template for `vars.yml`, which holds the real credentials (never committed) |
+| `manifest.yml` | Defines the CF app and its credentials (local only, git-ignored) |
 | `runtime.txt` | Sets the Python version for the buildpack |
-| `.cfignore` | Keeps `venv/`, `.env`, `vars.yml` and the key files out of the upload |
+| `.cfignore` | Keeps `venv/`, `.env` and the key files out of the upload |
 
 ### 1. Log in
 
@@ -31,19 +32,34 @@ cf login -a https://api.cf.<region>.hana.ondemand.com --sso
 cf target -o <org> -s <space>
 ```
 
-### 2. Fill in `vars.yml`
+### 2. Create `manifest.yml`
 
-```bash
-cp vars.example.yml vars.yml
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # use as mcp_api_key
+```yaml
+---
+applications:
+  - name: s3-mcp-server
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    buildpacks:
+      - python_buildpack
+    command: python s3_server.py
+    random-route: true
+    health-check-type: http
+    health-check-http-endpoint: /health
+    env:
+      S3_BUCKET_NAME: "<bucket>"
+      AWS_REGION: "<region>"
+      AWS_ACCESS_KEY_ID: "<access-key-id>"
+      AWS_SECRET_ACCESS_KEY: "<secret-access-key>"
+      MCP_API_KEY: "<api-key>"   # python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+      S3_MAX_ITEMS: "1000"
 ```
-
-Set the bucket name, region, AWS access key and secret, and the API key.
 
 ### 3. Push the app
 
 ```bash
-cf push --vars-file vars.yml
+cf push
 ```
 
 The `routes:` line in the `cf push` output gives the app URL. Check it with:
@@ -52,16 +68,16 @@ The `routes:` line in the `cf push` output gives the app URL. Check it with:
 curl https://<app-route>/health        # {"status":"ok"}
 ```
 
-The MCP endpoint is `https://<app-route>/mcp`. Every call needs the header `Authorization: Bearer <mcp_api_key>`.
+The MCP endpoint is `https://<app-route>/mcp`. Every call needs the header `Authorization: Bearer <MCP_API_KEY>`.
 
 ### 4. Connect Claude Code to the deployed server
 
 ```bash
 claude mcp add --transport http s3-explorer https://<app-route>/mcp \
-  --header "Authorization: Bearer <mcp_api_key>"
+  --header "Authorization: Bearer <MCP_API_KEY>"
 ```
 
-To change a credential later, edit `vars.yml` and run `cf push --vars-file vars.yml` again.
+To change a credential later, edit `manifest.yml` and run `cf push` again.
 
 ### Optional: XSUAA instead of an API key
 

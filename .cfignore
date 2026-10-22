@@ -6,4 +6,3 @@ destination_key.json
 destination.py
 download
 *.pyc
-vars.yml
