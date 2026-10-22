@@ -1,7 +1,10 @@
+import base64
 import hmac
 import json
+import mimetypes
 import os
 from typing import Optional
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
@@ -11,6 +14,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from mcp.types import BlobResourceContents, EmbeddedResource
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -40,6 +44,7 @@ S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL") or None  # for S3-compatible stor
 S3_ACCESS_KEY_ID = _objectstore.get("access_key_id") or os.getenv("AWS_ACCESS_KEY_ID") or None
 S3_SECRET_ACCESS_KEY = _objectstore.get("secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY") or None
 MAX_ITEMS_DEFAULT = int(os.getenv("S3_MAX_ITEMS", "1000"))
+MAX_READ_BYTES = int(os.getenv("S3_MAX_READ_BYTES", str(5 * 1024 * 1024)))
 
 
 class APIKeyVerifier(TokenVerifier):
@@ -89,13 +94,14 @@ async def health(request: Request) -> JSONResponse:
 
 def get_s3_client():
     # With no explicit keys, boto3 falls back to its standard chain (AWS_PROFILE, ~/.aws, IAM role).
+    # Regional endpoint so pre-signed URLs work for buckets outside us-east-1
     return boto3.client(
         "s3",
         region_name=AWS_REGION,
-        endpoint_url=S3_ENDPOINT_URL,
+        endpoint_url=S3_ENDPOINT_URL or f"https://s3.{AWS_REGION}.amazonaws.com",
         aws_access_key_id=S3_ACCESS_KEY_ID,
         aws_secret_access_key=S3_SECRET_ACCESS_KEY,
-        config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+        config=Config(signature_version="s3v4", retries={"max_attempts": 5, "mode": "standard"}),
     )
 
 
@@ -249,6 +255,78 @@ def get_object_info(key: str, bucket: Optional[str] = None) -> dict:
         "etag": h.get("ETag", "").strip('"'),
         "metadata": h.get("Metadata", {}),
     }
+
+
+@mcp.tool
+def get_download_url(key: str, bucket: Optional[str] = None, expires_in: int = 3600) -> dict:
+    """Create a temporary pre-signed URL to download an S3 file (any size) directly from S3.
+
+    Args:
+        key: Full object key, e.g. "reports/2025/q1.csv".
+        bucket: Bucket name. Defaults to the configured bucket.
+        expires_in: Seconds the link stays valid (60 - 604800, default 1 hour).
+    """
+    bucket = resolve_bucket(bucket)
+    expires_in = max(60, min(expires_in, 604800))
+    s3 = get_s3_client()
+    try:
+        head = s3.head_object(Bucket=bucket, Key=key)
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": key,
+                "ResponseContentDisposition": f'attachment; filename="{key.rsplit("/", 1)[-1]}"',
+            },
+            ExpiresIn=expires_in,
+        )
+    except (ClientError, BotoCoreError) as e:
+        raise ToolError(f"S3 error preparing download for s3://{bucket}/{key}: {e}") from e
+    return {
+        "bucket": bucket,
+        "key": key,
+        "size": head["ContentLength"],
+        "download_url": url,
+        "expires_in_seconds": expires_in,
+    }
+
+
+@mcp.tool
+def read_file(key: str, bucket: Optional[str] = None, max_bytes: int = MAX_READ_BYTES):
+    """Download an S3 file and return its contents: text for text files, an embedded file otherwise.
+
+    Use get_download_url for large files.
+
+    Args:
+        key: Full object key, e.g. "reports/2025/q1.csv".
+        bucket: Bucket name. Defaults to the configured bucket.
+        max_bytes: Refuse files larger than this (default from S3_MAX_READ_BYTES, 5 MB).
+    """
+    bucket = resolve_bucket(bucket)
+    s3 = get_s3_client()
+    try:
+        size = s3.head_object(Bucket=bucket, Key=key)["ContentLength"]
+        if size > max_bytes:
+            raise ToolError(
+                f"s3://{bucket}/{key} is {size} bytes, over the {max_bytes}-byte limit. "
+                "Use get_download_url instead."
+            )
+        data = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except (ClientError, BotoCoreError) as e:
+        raise ToolError(f"S3 error downloading s3://{bucket}/{key}: {e}") from e
+
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        mime_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
+        return EmbeddedResource(
+            type="resource",
+            resource=BlobResourceContents(
+                uri=f"s3://{bucket}/{quote(key)}",
+                mimeType=mime_type,
+                blob=base64.b64encode(data).decode(),
+            ),
+        )
 
 
 if __name__ == "__main__":

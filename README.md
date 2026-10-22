@@ -10,6 +10,8 @@ A FastMCP server that lists folders and files in an S3 bucket. You can run it lo
 | `list_folders_and_files` | Lists folders and files under an optional `prefix`. Set `recursive` to `true` for every level or `false` for one level only |
 | `get_folder_tree` | Returns the same contents as a nested folder tree |
 | `get_object_info` | Returns metadata for one object: size, content type, ETag and last-modified time |
+| `get_download_url` | Creates a temporary pre-signed link to download a file of any size straight from S3. Valid for 1 hour by default (`expires_in`) |
+| `read_file` | Returns a file's contents to the client: text for text files, an embedded file otherwise. Limited to 5 MB (`S3_MAX_READ_BYTES`) |
 
 If you don't pass `bucket`, every tool uses the configured bucket. On BTP that is the Object Store bucket; locally it is `S3_BUCKET_NAME`.
 
