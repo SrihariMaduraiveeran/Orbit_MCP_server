@@ -16,3 +16,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Local DB exports
+exports/

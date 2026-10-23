@@ -1,6 +1,8 @@
 # S3 Explorer MCP Server
 
-A FastMCP server that lists folders and files in an S3 bucket. You can run it locally or deploy it to SAP BTP Cloud Foundry.
+A FastMCP server that lists and downloads files in an S3 bucket. It also reads the enriched-data column from PostgreSQL tables whose names end with `ai`. You can run it locally or deploy it to SAP BTP Cloud Foundry.
+
+## S3 tools
 
 ## Tools
 
@@ -12,6 +14,42 @@ A FastMCP server that lists folders and files in an S3 bucket. You can run it lo
 | `get_object_info` | Returns metadata for one object: size, content type, ETag and last-modified time |
 | `get_download_url` | Creates a temporary pre-signed link to download a file of any size straight from S3. Valid for 1 hour by default (`expires_in`) |
 | `read_file` | Returns a file's contents to the client: text for text files, an embedded file otherwise. Limited to 5 MB (`S3_MAX_READ_BYTES`) |
+
+## PostgreSQL tools
+
+| Tool | Description |
+|------|-------------|
+| `list_ai_tables` | Lists tables whose names end with `ai`, in any case, and shows which one has the enriched-data column |
+| `get_enriched_data` | Reads the enriched column from one table, up to 1000 rows per call, with optional primary-key columns. Use `limit` and `offset` to page through it |
+| `export_enriched_data` | Exports the whole column as CSV or JSON. Over HTTP it returns a temporary download link (1 hour by default) served by this server. In local stdio mode it writes the file to `EXPORT_DIR` (default `exports/`) |
+
+Notes on the PostgreSQL tools:
+
+- **Read-only:** every session runs read-only, so the tools can't change data. A database user with `SELECT` access is enough.
+- **Column matching:** the column is matched ignoring case, spaces and underscores, so `enriched_data`, `"Enriched Data"` and `EnrichedData` all match. Set `DB_ENRICHED_COLUMN` and `DB_TABLE_SUFFIX` to change what's searched for.
+- **Download links:** each link carries a signed token derived from `MCP_API_KEY`, so it works without an `Authorization` header. Anyone with a link can download the file until it expires.
+- **Large exports:** the file streams straight from Postgres to the browser, so large exports use little memory.
+
+### On-premise database via Cloud Connector
+
+If PostgreSQL runs in a private network, create a BTP destination for it with these settings:
+
+- **Type:** `TCP`
+- **Proxy Type:** `OnPremise`
+- **Address:** the Cloud Connector virtual host and port
+- **Location ID:** the Cloud Connector's location ID, if one is set
+
+Then set `DB_DESTINATION_NAME` to the destination's name. List a Connectivity instance and a Destination instance under `services:` in `manifest.yml`. Existing instances in the space work; `cf push` only binds them and creates nothing. If none exist, create them with `cf create-service connectivity lite <name>` and `cf create-service destination lite <name>`.
+
+At runtime the server does three things:
+
+1. Reads the address and location ID from the destination.
+2. Gets a token from the Connectivity service.
+3. Opens a SOCKS5 tunnel through Cloud Connector.
+
+`DB_HOST` and `DB_PORT` aren't used in this mode. `DB_NAME`, `DB_USER` and `DB_PASSWORD` are still required.
+
+Without a Destination service, you can set `DB_PROXY_TYPE=OnPremise`, `DB_HOST`, `DB_PORT` and `DB_LOCATION_ID` directly instead.
 
 If you don't pass `bucket`, every tool uses the configured bucket. On BTP that is the Object Store bucket; locally it is `S3_BUCKET_NAME`.
 
@@ -56,6 +94,12 @@ applications:
       AWS_SECRET_ACCESS_KEY: "<secret-access-key>"
       MCP_API_KEY: "<api-key>"   # python3 -c "import secrets; print(secrets.token_urlsafe(32))"
       S3_MAX_ITEMS: "1000"
+      DB_HOST: "<db-host>"
+      DB_PORT: "5432"
+      DB_NAME: "<database-name>"
+      DB_USER: "<db-user>"
+      DB_PASSWORD: "<db-password>"
+      DB_SSLMODE: "require"
 ```
 
 ### 3. Push the app

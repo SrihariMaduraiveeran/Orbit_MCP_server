@@ -20,6 +20,9 @@ from starlette.responses import JSONResponse
 
 load_dotenv()
 
+import db_tools  # noqa: E402  (reads its settings from the environment loaded above)
+from db_tools import register_db_tools  # noqa: E402
+
 ON_CLOUD_FOUNDRY = "VCAP_APPLICATION" in os.environ
 
 
@@ -85,6 +88,7 @@ def build_auth() -> Optional[TokenVerifier]:
 
 
 mcp = FastMCP("S3 Explorer", auth=build_auth())
+register_db_tools(mcp)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -329,15 +333,27 @@ def read_file(key: str, bucket: Optional[str] = None, max_bytes: int = MAX_READ_
         )
 
 
+def public_base_url(port: int) -> str:
+    """URL clients use to reach this server: PUBLIC_BASE_URL, the app's CF route, or localhost."""
+    if os.getenv("PUBLIC_BASE_URL"):
+        return os.environ["PUBLIC_BASE_URL"]
+    uris = json.loads(os.getenv("VCAP_APPLICATION", "{}")).get("application_uris", [])
+    if uris:
+        return f"https://{uris[0]}"
+    return f"http://localhost:{port}"
+
+
 if __name__ == "__main__":
     # Cloud Foundry sets PORT; there the server always runs over HTTP.
     transport = os.getenv("MCP_TRANSPORT", "http" if "PORT" in os.environ else "stdio")
     if transport == "stdio":
         mcp.run()
     else:
+        port = int(os.getenv("PORT") or os.getenv("MCP_PORT", "8000"))
+        db_tools.public_base_url = public_base_url(port)  # enables download links for DB exports
         mcp.run(
             transport=transport,  # "http" or "sse"
             host=os.getenv("MCP_HOST", "0.0.0.0"),
-            port=int(os.getenv("PORT") or os.getenv("MCP_PORT", "8000")),
+            port=port,
             stateless_http=True,  # no sticky sessions needed across CF instances
         )
