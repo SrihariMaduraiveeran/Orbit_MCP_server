@@ -27,7 +27,7 @@ Notes on the PostgreSQL tools:
 
 - **Read-only:** every session runs read-only, so the tools can't change data. A database user with `SELECT` access is enough.
 - **Column matching:** the column is matched ignoring case, spaces and underscores, so `enriched_data`, `"Enriched Data"` and `EnrichedData` all match. Set `DB_ENRICHED_COLUMN` and `DB_TABLE_SUFFIX` to change what's searched for.
-- **Download links:** each link carries a signed token derived from `MCP_API_KEY`, so it works without an `Authorization` header. Anyone with a link can download the file until it expires.
+- **Download links:** each link carries a signed token derived from `DOWNLOAD_SIGNING_KEY`, so it works without an `Authorization` header. Anyone with a link can download the file until it expires.
 - **Large exports:** the file streams straight from Postgres to the browser, so large exports use little memory.
 
 ### On-premise database via Cloud Connector
@@ -92,7 +92,8 @@ applications:
       AWS_REGION: "<region>"
       AWS_ACCESS_KEY_ID: "<access-key-id>"
       AWS_SECRET_ACCESS_KEY: "<secret-access-key>"
-      MCP_API_KEY: "<api-key>"   # python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+      AUTHFORGE_URL: "https://<your-authforge-host>"
+      DOWNLOAD_SIGNING_KEY: "<random>"   # python3 -c "import secrets; print(secrets.token_urlsafe(32))"
       S3_MAX_ITEMS: "1000"
       DB_HOST: "<db-host>"
       DB_PORT: "5432"
@@ -114,13 +115,13 @@ The `routes:` line in the `cf push` output gives the app URL. Check it with:
 curl https://<app-route>/health        # {"status":"ok"}
 ```
 
-The MCP endpoint is `https://<app-route>/mcp`. Every call needs the header `Authorization: Bearer <MCP_API_KEY>`.
+The MCP endpoint is `https://<app-route>/mcp`. Every call needs the header `Authorization: Bearer <AuthForge access token>`, as described in [Authentication](#authentication-authforge-oauth-20) below.
 
 ### 4. Connect Claude Code to the deployed server
 
 ```bash
 claude mcp add --transport http s3-explorer https://<app-route>/mcp \
-  --header "Authorization: Bearer <MCP_API_KEY>"
+  --header "Authorization: Bearer <at_live_ access token>"
 ```
 
 To change a credential later, edit `manifest.yml` and run `cf push` again.
@@ -144,26 +145,58 @@ cf restage s3-mcp-server           # after re-binding services
 cf scale s3-mcp-server -i 2        # more instances (the server is stateless)
 ```
 
-## Authentication (AuthForge)
+## Authentication (AuthForge OAuth 2.0)
 
-Every HTTP request must send `Authorization: Bearer sk_live_...`. `authforge.py` checks each key with `POST {AUTHFORGE_URL}/api/auth/verify`:
+Callers use the OAuth 2.0 client credentials grant:
+
+1. Get an access token with your client ID and secret. Tokens start with `at_live_` and last 1 hour:
+   ```bash
+   curl -u "$CLIENT_ID:$CLIENT_SECRET" -d grant_type=client_credentials "$AUTHFORGE_URL/api/oauth/token"
+   ```
+2. Send it on every request as `Authorization: Bearer at_live_...`.
+
+`authforge.py` checks each token with `POST {AUTHFORGE_URL}/api/oauth/introspect`:
 
 | Result | Response |
 |---|---|
-| Valid | The request passes through. `app_id`, `key_name` and `scope` are added to `request.state.authforge` |
-| Invalid, revoked, expired or over quota | `401` with AuthForge's reason |
-| No header, or key doesn't start with `sk_live_` | `401`, without calling AuthForge |
+| `active: true` | The request passes through. `app_id`, `client_id`, `client_name` and `scope` are added to `request.state.authforge` |
+| Inactive, revoked, expired or over quota | `401` with AuthForge's reason |
+| No header, or token doesn't start with `at_live_` | `401`, without calling AuthForge |
 | AuthForge unreachable or returning 5xx | `503` (fails closed) |
 
-These paths are public: `/health`, `/docs`, `/openapi.json` and `/download/enriched`. Download links carry their own signed, expiring token because browsers can't send headers. Change the list with `AUTHFORGE_PUBLIC_PATHS`.
+These paths are public: `/health`, `/docs`, `/openapi.json` and `/download/enriched`. Download links carry their own signed, expiring token, signed with `DOWNLOAD_SIGNING_KEY`. Change the list with `AUTHFORGE_PUBLIC_PATHS`.
+
+To revoke a single token: `curl -u "$CLIENT_ID:$CLIENT_SECRET" -d "token=at_live_..." "$AUTHFORGE_URL/api/oauth/revoke"`.
 
 | Setting | Purpose |
 |---|---|
 | `AUTHFORGE_URL` | Required; the server refuses to start without it |
-| `AUTHFORGE_TIMEOUT_SECONDS` | Verify timeout, default 5 seconds |
+| `AUTHFORGE_TIMEOUT_SECONDS` | Introspection timeout, default 5 seconds |
+| `DOWNLOAD_SIGNING_KEY` | Signs DB export download links. Use any long random string |
 | `AUTHFORGE_DISABLED=true` | Local development only |
 
-When AuthForge is enabled it replaces the `MCP_API_KEY` and XSUAA checks. `MCP_API_KEY` is still used to sign download links.
+The server itself needs no client ID or secret. Only callers do.
+
+## Logs
+
+The app writes one log line for each:
+
+- **authentication decision:** the result, the reason, client IP, user agent, the masked key, AuthForge `app_id` and `key_name`, and how long the verify call took
+- **tool call:** the tool, its arguments, the caller, the duration, and whether it succeeded
+- **download**
+
+It also writes a startup summary. Secrets are never logged.
+
+```bash
+cf logs s3-mcp-server                      # live
+cf logs s3-mcp-server --recent | grep mcp_app.auth    # recent auth decisions
+cf logs s3-mcp-server --recent | grep "auth denied"   # why requests got 401
+```
+
+| Setting | Values |
+|---|---|
+| `LOG_LEVEL` | `DEBUG`, `INFO` (default), `WARNING` or `ERROR` |
+| `LOG_FORMAT` | `text` (default), or `json` for SAP Cloud Logging and Kibana |
 
 ## Run locally
 
@@ -177,7 +210,7 @@ MCP_TRANSPORT=http python s3_server.py      # HTTP at http://localhost:8000/mcp
 fastmcp dev s3_server.py                    # MCP Inspector UI for testing
 ```
 
-Locally, the server uses no authentication unless `MCP_API_KEY` is set. On Cloud Foundry it refuses to start unless `MCP_API_KEY` is set or an XSUAA service is bound. You can override that with `ALLOW_UNAUTHENTICATED=true`, but don't do it in production.
+Locally, set `AUTHFORGE_URL` to use AuthForge, or `AUTHFORGE_DISABLED=true` for no authentication. On Cloud Foundry, with AuthForge disabled, the server refuses to start unless an XSUAA service is bound. You can override that with `ALLOW_UNAUTHENTICATED=true`, but don't do it in production.
 
 ### Note on FIPS-mode OpenSSL (local only)
 

@@ -1,6 +1,6 @@
 import base64
-import hmac
 import json
+import logging
 import mimetypes
 import os
 from typing import Optional
@@ -12,7 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.server.auth import AccessToken, TokenVerifier
+from fastmcp.server.auth import TokenVerifier
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.types import BlobResourceContents, EmbeddedResource
 from starlette.middleware import Middleware
@@ -20,6 +20,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 load_dotenv()
+
+from app_logging import ToolLoggingMiddleware, get_logger, log, setup_logging  # noqa: E402
+
+setup_logging()
+logger = get_logger("server")
 
 import db_tools  # noqa: E402  (reads its settings from the environment loaded above)
 from authforge import AuthForgeMiddleware, authforge_enabled  # noqa: E402
@@ -52,32 +57,16 @@ MAX_ITEMS_DEFAULT = int(os.getenv("S3_MAX_ITEMS", "1000"))
 MAX_READ_BYTES = int(os.getenv("S3_MAX_READ_BYTES", str(5 * 1024 * 1024)))
 
 
-class APIKeyVerifier(TokenVerifier):
-    """Accepts requests whose bearer token equals the configured API key."""
-
-    def __init__(self, api_key: str):
-        super().__init__()
-        self.api_key = api_key
-
-    async def verify_token(self, token: str) -> Optional[AccessToken]:
-        if not hmac.compare_digest(token.encode(), self.api_key.encode()):
-            return None
-        return AccessToken(token="api-key", client_id="api-key-client", scopes=[])
-
-
 def build_auth() -> Optional[TokenVerifier]:
-    """XSUAA JWTs when an XSUAA service is bound, otherwise a static API key (MCP_API_KEY)."""
+    """AuthForge OAuth (middleware) by default; XSUAA JWTs only when AuthForge is disabled and XSUAA is bound."""
     if authforge_enabled():
         return None  # AuthForgeMiddleware authenticates every HTTP request instead
     xsuaa = get_service_credentials("xsuaa")
     if not xsuaa:
-        api_key = os.getenv("MCP_API_KEY")
-        if api_key:
-            return APIKeyVerifier(api_key)
         if ON_CLOUD_FOUNDRY and os.getenv("ALLOW_UNAUTHENTICATED", "").lower() != "true":
             raise RuntimeError(
-                "No authentication configured. Set MCP_API_KEY, bind an XSUAA service "
-                "(see xs-security.json), or set ALLOW_UNAUTHENTICATED=true."
+                "No authentication configured. Enable AuthForge (unset AUTHFORGE_DISABLED), bind an XSUAA "
+                "service (see xs-security.json), or set ALLOW_UNAUTHENTICATED=true."
             )
         return None
 
@@ -93,6 +82,7 @@ def build_auth() -> Optional[TokenVerifier]:
 
 mcp = FastMCP("S3 Explorer", auth=build_auth())
 register_db_tools(mcp)
+mcp.add_middleware(ToolLoggingMiddleware())
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -357,6 +347,14 @@ if __name__ == "__main__":
             raise SystemExit("AUTHFORGE_URL is not set. Set it, or AUTHFORGE_DISABLED=true for local development.")
         port = int(os.getenv("PORT") or os.getenv("MCP_PORT", "8000"))
         db_tools.public_base_url = public_base_url(port)  # enables download links for DB exports
+        log(logger, logging.INFO, "server starting",
+            transport=transport, port=port, public_url=db_tools.public_base_url,
+            auth="authforge-oauth" if authforge_enabled() else "xsuaa/none",
+            authforge_url=os.getenv("AUTHFORGE_URL") if authforge_enabled() else None,
+            s3_bucket=S3_BUCKET_NAME, s3_region=AWS_REGION,
+            db=("destination:" + db_tools.DB_DESTINATION_NAME) if db_tools.DB_DESTINATION_NAME
+            else ("direct:" + os.getenv("DB_HOST", "")) if os.getenv("DB_HOST") else "not configured",
+            db_name=os.getenv("DB_NAME"))
         mcp.run(
             transport=transport,  # "http" or "sse"
             host=os.getenv("MCP_HOST", "0.0.0.0"),

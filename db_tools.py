@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -22,6 +23,10 @@ from psycopg import sql
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
+
+from app_logging import client_info, get_logger, log
+
+logger = get_logger("db")
 
 TABLE_SUFFIX = os.getenv("DB_TABLE_SUFFIX", "ai")
 ENRICHED_COLUMN = os.getenv("DB_ENRICHED_COLUMN", "enriched_data")
@@ -252,7 +257,7 @@ def generate_export(target: dict, include_id: bool, non_null_only: bool, fmt: st
 # --- Signed download links --------------------------------------------------------------------
 
 def _signing_key() -> bytes:
-    secret = os.getenv("DOWNLOAD_SIGNING_KEY") or os.getenv("MCP_API_KEY")
+    secret = os.getenv("DOWNLOAD_SIGNING_KEY")
     if secret:
         return hmac.new(secret.encode(), b"enriched-download-links", hashlib.sha256).digest()
     # No shared secret: links only work on this process (fine for local use)
@@ -416,8 +421,11 @@ def register_db_tools(mcp: FastMCP) -> None:
     @mcp.custom_route("/download/enriched", methods=["GET"])
     async def download_enriched(request: Request):
         # The signed, expiring token is the authorization: it can only have been issued by export_enriched_data.
+        client = client_info({k.lower(): v for k, v in request.headers.items()},
+                             request.client.host if request.client else None)
         payload = verify_token(request.query_params.get("token", ""))
         if payload is None:
+            log(logger, logging.WARNING, "download denied: invalid or expired link", status=403, **client)
             return JSONResponse({"error": "Download link is invalid or has expired."}, status_code=403)
 
         def resolve():
@@ -427,9 +435,12 @@ def register_db_tools(mcp: FastMCP) -> None:
         try:
             target = await run_in_threadpool(resolve)
         except (ToolError, psycopg.Error) as e:
+            log(logger, logging.WARNING, "download failed", status=404, table=payload.get("t"), error=str(e), **client)
             return JSONResponse({"error": str(e)}, status_code=404)
 
         fmt = payload["f"]
+        log(logger, logging.INFO, "download started", schema=target["schema"], table=target["table"],
+            column=target["enriched_column"], format=fmt, **client)
         return StreamingResponse(
             generate_export(target, payload["id"], payload["nn"], fmt),
             media_type="text/csv; charset=utf-8" if fmt == "csv" else "application/json",
