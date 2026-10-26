@@ -144,6 +144,27 @@ cf restage s3-mcp-server           # after re-binding services
 cf scale s3-mcp-server -i 2        # more instances (the server is stateless)
 ```
 
+## Authentication (AuthForge)
+
+Every HTTP request must send `Authorization: Bearer sk_live_...`. `authforge.py` checks each key with `POST {AUTHFORGE_URL}/api/auth/verify`:
+
+| Result | Response |
+|---|---|
+| Valid | The request passes through. `app_id`, `key_name` and `scope` are added to `request.state.authforge` |
+| Invalid, revoked, expired or over quota | `401` with AuthForge's reason |
+| No header, or key doesn't start with `sk_live_` | `401`, without calling AuthForge |
+| AuthForge unreachable or returning 5xx | `503` (fails closed) |
+
+These paths are public: `/health`, `/docs`, `/openapi.json` and `/download/enriched`. Download links carry their own signed, expiring token because browsers can't send headers. Change the list with `AUTHFORGE_PUBLIC_PATHS`.
+
+| Setting | Purpose |
+|---|---|
+| `AUTHFORGE_URL` | Required; the server refuses to start without it |
+| `AUTHFORGE_TIMEOUT_SECONDS` | Verify timeout, default 5 seconds |
+| `AUTHFORGE_DISABLED=true` | Local development only |
+
+When AuthForge is enabled it replaces the `MCP_API_KEY` and XSUAA checks. `MCP_API_KEY` is still used to sign download links.
+
 ## Run locally
 
 ```bash

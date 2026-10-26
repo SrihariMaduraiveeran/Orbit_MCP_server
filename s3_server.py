@@ -15,12 +15,14 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.types import BlobResourceContents, EmbeddedResource
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 load_dotenv()
 
 import db_tools  # noqa: E402  (reads its settings from the environment loaded above)
+from authforge import AuthForgeMiddleware, authforge_enabled  # noqa: E402
 from db_tools import register_db_tools  # noqa: E402
 
 ON_CLOUD_FOUNDRY = "VCAP_APPLICATION" in os.environ
@@ -65,6 +67,8 @@ class APIKeyVerifier(TokenVerifier):
 
 def build_auth() -> Optional[TokenVerifier]:
     """XSUAA JWTs when an XSUAA service is bound, otherwise a static API key (MCP_API_KEY)."""
+    if authforge_enabled():
+        return None  # AuthForgeMiddleware authenticates every HTTP request instead
     xsuaa = get_service_credentials("xsuaa")
     if not xsuaa:
         api_key = os.getenv("MCP_API_KEY")
@@ -349,6 +353,8 @@ if __name__ == "__main__":
     if transport == "stdio":
         mcp.run()
     else:
+        if authforge_enabled() and not os.getenv("AUTHFORGE_URL"):
+            raise SystemExit("AUTHFORGE_URL is not set. Set it, or AUTHFORGE_DISABLED=true for local development.")
         port = int(os.getenv("PORT") or os.getenv("MCP_PORT", "8000"))
         db_tools.public_base_url = public_base_url(port)  # enables download links for DB exports
         mcp.run(
@@ -356,4 +362,5 @@ if __name__ == "__main__":
             host=os.getenv("MCP_HOST", "0.0.0.0"),
             port=port,
             stateless_http=True,  # no sticky sessions needed across CF instances
+            middleware=[Middleware(AuthForgeMiddleware)] if authforge_enabled() else None,
         )
