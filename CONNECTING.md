@@ -1,6 +1,6 @@
 # Connecting to the Orbit MCP Server
 
-This guide shows how to call the Orbit MCP server from **Postman** and from **Python**. The server lists and downloads files from the S3 bucket and reads the enriched-data column from the PostgreSQL tables whose names end with `ai`.
+This guide shows how to call the Orbit MCP server from **Claude Desktop**, **Postman** and **Python**. The server lists and downloads files from the S3 bucket and reads the enriched-data column from the PostgreSQL tables whose names end with `ai`.
 
 Access is secured with **AuthForge OAuth 2.0 (client credentials)**. You swap your client ID and secret for a short-lived access token, then send that token with every request.
 
@@ -71,7 +71,125 @@ Access is secured with **AuthForge OAuth 2.0 (client credentials)**. You swap yo
 
 ---
 
-## 3. Postman
+## 3. Claude Desktop / claude.ai
+
+### Recommended: Add custom connector (OAuth sign-in)
+
+The server tells Claude where to sign in. Its `401` response points to `/.well-known/oauth-protected-resource`, which names AuthForge. Claude then runs the OAuth sign-in (Authorization Code + PKCE) against AuthForge with your client ID and secret.
+
+1. In Claude Desktop or claude.ai, open **Settings → Connectors → Add custom connector**.
+2. **Name:** `orbit`. **URL:** `https://s3-mcp-server-terrific-bear-cx.cfapps.us10-001.hana.ondemand.com/mcp`
+3. **Authentication:** **Sign in now**. Claude should show it as *Detected*.
+4. **OAuth client:** **Use your own OAuth client**. Under *Advanced settings*, paste your AuthForge **client ID** and **client secret**.
+
+   AuthForge offers no automatic client registration, so the *published identity* and *Register automatically* options don't apply here.
+5. Click **Add**, then **Connect**. A browser window opens AuthForge's sign-in page. Approve it, and the 9 tools appear.
+
+> **For the AuthForge admin:** the OAuth client must allow the **authorization_code** grant and have Claude's callback URL registered as a redirect URI: `https://claude.ai/api/mcp/auth_callback`. If the sign-in page shows a redirect URI error, this is the cause.
+
+### Alternatives (config file, no browser sign-in)
+
+Use these if the connector sign-in isn't set up for your client, or for automation:
+
+| | Option A: client ID and secret only | Option B: bridge script |
+|---|---|---|
+| You need | **Node.js** | **Python** and the file `authforge_bridge.py` |
+| What happens | Claude Desktop sends your client ID and secret (over HTTPS); the server gets and renews the token | A script on your PC gets and renews the token, and only the token is sent |
+
+### Option A: client ID and secret only
+
+1. Install **Node.js** (LTS) from nodejs.org.
+2. Turn `client_id:client_secret` into a Base64 string:
+
+   **Windows PowerShell**
+   ```powershell
+   [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("client_your_id:cs_your_secret"))
+   ```
+   **macOS / Linux**
+   ```bash
+   printf '%s' 'client_your_id:cs_your_secret' | base64
+   ```
+3. In Claude Desktop, open **Settings → Developer → Edit Config** and add the `orbit` entry, with the Base64 string after `Basic `:
+   ```json
+   {
+     "mcpServers": {
+       "orbit": {
+         "command": "npx",
+         "args": [
+           "-y", "mcp-remote",
+           "https://s3-mcp-server-terrific-bear-cx.cfapps.us10-001.hana.ondemand.com/mcp",
+           "--header", "Authorization:${AUTH}"
+         ],
+         "env": { "AUTH": "Basic PASTE_BASE64_STRING_HERE" }
+       }
+     }
+   }
+   ```
+   Write `Authorization:${AUTH}` exactly like that, without spaces. Spaces inside arguments break on Windows.
+4. **Fully quit Claude Desktop** (on Windows, also from the system tray) and start it again. **orbit** should list 9 tools.
+
+> The Base64 string is your client secret in disguise, not encryption. Treat the config file like a password. If it leaks, revoke or rotate the client in AuthForge.
+
+### Option B: bridge script
+
+#### Step 1: Install Python and the bridge
+
+1. Install **Python 3.10 or later** from python.org. On Windows, tick **"Add python.exe to PATH"** during setup.
+2. Install the library the bridge uses:
+   ```bash
+   pip install fastmcp
+   ```
+3. Save [`authforge_bridge.py`](authforge_bridge.py) somewhere permanent, e.g. `C:\orbit\authforge_bridge.py` or `~/orbit/authforge_bridge.py`.
+
+#### Step 2: Add the server to Claude Desktop's config
+
+1. In Claude Desktop, open **Settings → Developer → Edit Config**. This opens `claude_desktop_config.json`.
+2. Add the `orbit` entry. If the file already has `mcpServers`, add `orbit` inside it.
+
+   **Windows**
+   ```json
+   {
+     "mcpServers": {
+       "orbit": {
+         "command": "python",
+         "args": ["C:\\orbit\\authforge_bridge.py"],
+         "env": {
+           "MCP_URL": "https://s3-mcp-server-terrific-bear-cx.cfapps.us10-001.hana.ondemand.com/mcp",
+           "AUTHFORGE_URL": "https://authforge.cfapps.us10-001.hana.ondemand.com",
+           "CLIENT_ID": "client_your_id",
+           "CLIENT_SECRET": "cs_your_secret"
+         }
+       }
+     }
+   }
+   ```
+
+   **macOS**: same, but use `"command": "python3"` and `"args": ["/Users/<you>/orbit/authforge_bridge.py"]`.
+
+   If Claude Desktop can't find `python`, put the full path to `python.exe` (Windows) or `python3` (macOS) in `command`.
+
+3. Save the file, then **fully quit Claude Desktop** (on Windows, also from the system tray) and start it again.
+4. Open a new chat and click the tools icon: **orbit** should list 9 tools. Try *"List the AI tables"*.
+
+> If you already added a custom connector named **orbit** through *Settings → Connectors*, remove it first to avoid confusion.
+
+### If it doesn't work
+
+**Option A:** the server answers `401 invalid_client` when the client ID or secret is wrong; check the Base64 string. A browser window asking you to sign in means the header wasn't sent: check `Authorization:${AUTH}` and the `env` block.
+
+**Option B:** Claude Desktop shows the bridge's messages in **Settings → Developer → orbit → Open Logs Folder** (`mcp-server-orbit.log`):
+
+| Log message | Meaning |
+|---|---|
+| `new access token at_live_... valid for 3600s` | Working |
+| `missing environment variables: ...` | An `env` value is missing in the config |
+| `AuthForge token request failed (HTTP 401)` | `CLIENT_ID` or `CLIENT_SECRET` is wrong, or the client was revoked |
+| `AuthForge unreachable` | No internet access, or AuthForge is down |
+| `'python' is not recognized` / `ENOENT` | Python isn't on PATH. Use the full path in `command` |
+
+---
+
+## 4. Postman
 
 ### Step 1: Create an environment
 
@@ -206,7 +324,7 @@ Copy the `download_url` from the response and open it in a browser, or in a new 
 
 ---
 
-## 4. Python
+## 5. Python
 
 Set your credentials as environment variables first. Never put them in the script.
 
@@ -395,7 +513,7 @@ with requests.get(link["download_url"], timeout=600) as r:
 
 ---
 
-## 5. Testing with curl
+## 6. Testing with curl
 
 ```bash
 AF=https://authforge.cfapps.us10-001.hana.ondemand.com
@@ -417,7 +535,7 @@ curl -u "$CLIENT_ID:$CLIENT_SECRET" -d "token=$TOKEN" "$AF/api/oauth/revoke"
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | You see | Meaning | Fix |
 |---|---|---|

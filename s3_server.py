@@ -347,10 +347,16 @@ if __name__ == "__main__":
             raise SystemExit("AUTHFORGE_URL is not set. Set it, or AUTHFORGE_DISABLED=true for local development.")
         port = int(os.getenv("PORT") or os.getenv("MCP_PORT", "8000"))
         db_tools.public_base_url = public_base_url(port)  # enables download links for DB exports
+        # Exact URL clients (e.g. Claude's custom connector) use; advertised in the RFC 9728 metadata
+        mcp_public_url = os.getenv("MCP_PUBLIC_URL") or f"{db_tools.public_base_url.rstrip('/')}/mcp"
+        if authforge_enabled() and not os.getenv("MCP_PUBLIC_URL"):
+            log(logger, logging.WARNING, "MCP_PUBLIC_URL not set; derived from the app route",
+                mcp_public_url=mcp_public_url)
         log(logger, logging.INFO, "server starting",
             transport=transport, port=port, public_url=db_tools.public_base_url,
             auth="authforge-oauth" if authforge_enabled() else "xsuaa/none",
             authforge_url=os.getenv("AUTHFORGE_URL") if authforge_enabled() else None,
+            mcp_public_url=mcp_public_url if authforge_enabled() else None,
             s3_bucket=S3_BUCKET_NAME, s3_region=AWS_REGION,
             db=("destination:" + db_tools.DB_DESTINATION_NAME) if db_tools.DB_DESTINATION_NAME
             else ("direct:" + os.getenv("DB_HOST", "")) if os.getenv("DB_HOST") else "not configured",
@@ -360,5 +366,5 @@ if __name__ == "__main__":
             host=os.getenv("MCP_HOST", "0.0.0.0"),
             port=port,
             stateless_http=True,  # no sticky sessions needed across CF instances
-            middleware=[Middleware(AuthForgeMiddleware)] if authforge_enabled() else None,
+            middleware=[Middleware(AuthForgeMiddleware, mcp_public_url=mcp_public_url)] if authforge_enabled() else None,
         )

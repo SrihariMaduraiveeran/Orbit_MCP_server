@@ -162,6 +162,9 @@ Callers use the OAuth 2.0 client credentials grant:
 | `active: true` | The request passes through. `app_id`, `client_id`, `client_name` and `scope` are added to `request.state.authforge` |
 | Inactive, revoked, expired or over quota | `401` with AuthForge's reason |
 | No header, or token doesn't start with `at_live_` | `401`, without calling AuthForge |
+| `Authorization: Basic base64(client_id:client_secret)` | The server gets an `at_live_` token from AuthForge, caches it until shortly before it expires, and introspects it on every request. Wrong credentials get `401 invalid_client`. Turn this off with `AUTHFORGE_ALLOW_BASIC=false` |
+
+**OAuth discovery (RFC 9728).** The server serves `/.well-known/oauth-protected-resource`, plus the `/mcp`-suffixed variant, publicly. The document names AuthForge as the authorization server for `MCP_PUBLIC_URL`. Every `401` carries `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource"`, so Claude's *Add custom connector* can run Authorization Code + PKCE against AuthForge. The resulting `at_live_` token is introspected like any other.
 | AuthForge unreachable or returning 5xx | `503` (fails closed) |
 
 These paths are public: `/health`, `/docs`, `/openapi.json` and `/download/enriched`. Download links carry their own signed, expiring token, signed with `DOWNLOAD_SIGNING_KEY`. Change the list with `AUTHFORGE_PUBLIC_PATHS`.
@@ -171,11 +174,16 @@ To revoke a single token: `curl -u "$CLIENT_ID:$CLIENT_SECRET" -d "token=at_live
 | Setting | Purpose |
 |---|---|
 | `AUTHFORGE_URL` | Required; the server refuses to start without it |
+| `MCP_PUBLIC_URL` | The exact URL users paste into Claude, ending in `/mcp`. It's advertised as the `resource` in the metadata. If it isn't set, it's derived from the app route and a warning is logged |
 | `AUTHFORGE_TIMEOUT_SECONDS` | Introspection timeout, default 5 seconds |
 | `DOWNLOAD_SIGNING_KEY` | Signs DB export download links. Use any long random string |
 | `AUTHFORGE_DISABLED=true` | Local development only |
 
 The server itself needs no client ID or secret. Only callers do.
+
+### Claude Desktop
+
+Use *Add custom connector* → **Sign in now** → **Use your own OAuth client**, with an AuthForge client ID and secret. Config-file alternatives: send the client ID and secret as `Authorization: Basic …` through `mcp-remote`, or run [`authforge_bridge.py`](authforge_bridge.py). Claude Desktop starts it through `claude_desktop_config.json`; it gets and renews `at_live_` tokens itself and forwards requests to `/mcp`. Setup steps are in [CONNECTING.md](CONNECTING.md#3-claude-desktop).
 
 ## Logs
 
